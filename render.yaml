@@ -24,7 +24,7 @@ services:
       - key: SMTP_PASS
         sync: false
       - key: ALLOWED_ORIGINS
-        sync: false
+        value: https://animealert.vercel.app,http://localhost:5173
 
 databases:
   - name: animealert-db
