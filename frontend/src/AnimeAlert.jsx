@@ -19,14 +19,30 @@ function urgency(deadline) {
   return 'green';
 }
 
-function apiFetch(path, options = {}) {
-  return fetch(`${API_BASE}${path}`, options).then(async res => {
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || `HTTP ${res.status}`);
+async function apiFetch(path, options = {}, retries = 3) {
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const res = await fetch(`${API_BASE}${path}`, options);
+      const text = await res.text();
+      // Guard against HTML error pages (Render cold-start 504, Vercel error page)
+      if (text.trimStart().startsWith('<')) {
+        if (attempt < retries - 1) {
+          await new Promise(r => setTimeout(r, 8000 * (attempt + 1)));
+          continue;
+        }
+        throw new Error('Server is waking up — please refresh in 30 seconds');
+      }
+      const data = JSON.parse(text);
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      return data;
+    } catch (err) {
+      if (attempt < retries - 1 && err.name !== 'SyntaxError') {
+        await new Promise(r => setTimeout(r, 8000 * (attempt + 1)));
+        continue;
+      }
+      throw err;
     }
-    return res.json();
-  });
+  }
 }
 
 // ── Auth Modal ──────────────────────────────────────────────────────────────
@@ -190,6 +206,7 @@ export default function AnimeAlert() {
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState('');
+  const [retrying, setRetrying] = useState(false);
   const [search, setSearch] = useState('');
   const [filterSource, setFilterSource] = useState('');
   const [filterType, setFilterType] = useState('');
@@ -200,13 +217,22 @@ export default function AnimeAlert() {
   const [showSettings, setShowSettings] = useState(false);
   const [showWatchlist, setShowWatchlist] = useState(false);
 
-  // Load products
-  useEffect(() => {
-    apiFetch('/products')
-      .then(setProducts)
-      .catch(e => setFetchError(e.message))
-      .finally(() => setLoading(false));
+  // Load products (with cold-start retry)
+  const loadProducts = useCallback(() => {
+    setLoading(true);
+    setFetchError('');
+    setRetrying(false);
+    const controller = new AbortController();
+    // Show "retrying" message after first 5s
+    const hint = setTimeout(() => setRetrying(true), 5000);
+    apiFetch('/products', { signal: controller.signal })
+      .then(data => { setProducts(data); setRetrying(false); })
+      .catch(e => { if (e.name !== 'AbortError') setFetchError(e.message); })
+      .finally(() => { clearTimeout(hint); setLoading(false); });
+    return () => { controller.abort(); clearTimeout(hint); };
   }, []);
+
+  useEffect(() => { return loadProducts(); }, [loadProducts]);
 
   // Load user + watchlist when token changes
   useEffect(() => {
@@ -333,8 +359,25 @@ export default function AnimeAlert() {
         <p className="empty">Your watchlist is empty. Save items to track their deadlines.</p>
       )}
 
-      {loading && <p className="empty">Loading products…</p>}
-      {fetchError && <p className="msg-error center">Failed to load products: {fetchError}</p>}
+      {loading && (
+        <div className="cold-start">
+          <p className="empty">{retrying ? '⏳ Server is waking up… retrying automatically (up to 30s)' : 'Loading products…'}</p>
+          {retrying && <p className="empty" style={{fontSize:'0.8rem'}}>Render free tier sleeps after 15 min of inactivity.</p>}
+        </div>
+      )}
+      {fetchError && (
+        <div className="cold-start">
+          <p className="msg-error center">{fetchError}</p>
+          <button className="btn btn-primary" style={{margin:'0.75rem auto',display:'block'}} onClick={loadProducts}>
+            Retry
+          </button>
+          {fetchError.includes('waking') && (
+            <p className="empty" style={{fontSize:'0.8rem'}}>
+              Render free tier can take up to 50s to start. Click Retry or wait a moment and refresh.
+            </p>
+          )}
+        </div>
+      )}
 
       {!loading && !fetchError && groups.length === 0 && (
         <p className="empty">No products found{search || filterSource || filterType ? ' matching your filters' : ''}.</p>

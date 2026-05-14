@@ -295,3 +295,11 @@ body {
   .grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
   .header { flex-direction: column; align-items: flex-start; }
 }
+
+.cold-start {
+  text-align: center;
+  padding: 2rem 1rem;
+  border: 1px dashed var(--border);
+  border-radius: 0.5rem;
+  margin: 1rem 0;
+}
