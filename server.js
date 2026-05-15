@@ -45,8 +45,10 @@ app.use('/api', rateLimit({
   message: { error: 'Too many requests, please slow down.' },
 }));
 
-// In-memory product cache
+// In-memory product cache (per source, so partial failures don't wipe good data)
 let cachedProducts = [];
+let cachedGsc = [];
+let cachedAmi = [];
 let lastScrape = null;
 
 async function runScraper() {
@@ -57,9 +59,14 @@ async function runScraper() {
     const ami = results[1].status === 'fulfilled' ? results[1].value : [];
     if (results[0].status === 'rejected') console.error('[scraper] GoodSmile failed:', results[0].reason?.message);
     if (results[1].status === 'rejected') console.error('[scraper] AmiAmi failed:', results[1].reason?.message);
-    cachedProducts = mergeProducts([...gsc, ...ami]);
+    // Only update cache for sources that returned data (preserve old data on 403)
+    if (gsc.length > 0) cachedGsc = gsc;
+    else console.log('[scraper] GSC returned 0, keeping previous cache (' + cachedGsc.length + ')');
+    if (ami.length > 0) cachedAmi = ami;
+    else console.log('[scraper] AMI returned 0, keeping previous cache (' + cachedAmi.length + ')');
+    cachedProducts = mergeProducts([...cachedGsc, ...cachedAmi]);
     lastScrape = new Date().toISOString();
-    console.log(`[scraper] done — ${cachedProducts.length} products (GSC: ${gsc.length}, AMI: ${ami.length})`);
+    console.log(`[scraper] done — ${cachedProducts.length} products (GSC: ${cachedGsc.length}, AMI: ${cachedAmi.length})`);
   } catch (err) {
     console.error('[scraper] error:', err.message);
   }

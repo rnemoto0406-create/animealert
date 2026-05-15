@@ -1,13 +1,24 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 
-const DELAY_MS = 1500;
+const DELAY_MS = 2000;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-  'Accept': 'application/json, text/html,application/xhtml+xml',
-  'Accept-Language': 'en-US,en;q=0.9,ja;q=0.8',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Accept': 'application/json, text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Accept-Encoding': 'gzip, deflate, br',
+  'Sec-Fetch-Dest': 'document',
+  'Sec-Fetch-Mode': 'navigate',
+  'Sec-Fetch-Site': 'none',
+  'Sec-Fetch-User': '?1',
+  'Sec-Ch-Ua': '"Not A(Brand";v="99", "Google Chrome";v="131", "Chromium";v="131"',
+  'Sec-Ch-Ua-Mobile': '?0',
+  'Sec-Ch-Ua-Platform': '"Windows"',
+  'Upgrade-Insecure-Requests': '1',
+  'Connection': 'keep-alive',
+  'Referer': 'https://www.google.com/',
 };
 
 /**
@@ -54,7 +65,19 @@ async function scrapeAmiAmi(pages = 3) {
           lang: 'eng',
         },
         timeout: 20000,
-        headers: { ...HEADERS, 'X-User-Key': 'amiami_dev' },
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+          'Accept': 'application/json, text/plain, */*',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Accept-Encoding': 'gzip, deflate, br',
+          'X-User-Key': 'amiami_dev',
+          'Referer': 'https://www.amiami.com/',
+          'Origin': 'https://www.amiami.com',
+          'Sec-Fetch-Dest': 'empty',
+          'Sec-Fetch-Mode': 'cors',
+          'Sec-Fetch-Site': 'same-site',
+          'Connection': 'keep-alive',
+        },
       });
 
       const items = res.data?.items || res.data?.RSuccess?.items || [];
