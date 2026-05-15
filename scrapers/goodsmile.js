@@ -7,326 +7,172 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-  'Accept-Language': 'en-US,en;q=0.9,ja;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.9',
 };
 
-const JP_EN = {
-  'フィギュア': 'Figure', 'プラモデル': 'Plastic Model', 'ぬいぐるみ': 'Plush',
-  'アクセサリー': 'Accessories', 'キーホルダー': 'Keychain', 'タオル': 'Towel',
-  'Tシャツ': 'T-Shirt', 'ポスター': 'Poster', 'バッグ': 'Bag',
-  'スケール': 'Scale', 'ねんどろいど': 'Nendoroid', 'figma': 'figma',
-  '予約受付中': 'Pre-order', '再販': 'Re-release',
-};
-
-function translateJP(text) {
-  if (!text) return '';
-  for (const [jp, en] of Object.entries(JP_EN)) {
-    text = text.replaceAll(jp, en);
-  }
-  return text;
-}
-
-function parseDate(raw) {
-  if (!raw) return null;
-  const str = String(raw).trim();
-  const iso = str.match(/(\d{4})[/-](\d{1,2})[/-](\d{1,2})/);
-  if (iso) return `${iso[1]}-${iso[2].padStart(2, '0')}-${iso[3].padStart(2, '0')}`;
-  const jp = str.match(/(\d{4})年(\d{1,2})月(\d{1,2})日/);
-  if (jp) return `${jp[1]}-${jp[2].padStart(2, '0')}-${jp[3].padStart(2, '0')}`;
-  const jpMonth = str.match(/(\d{4})年(\d{1,2})月/);
-  if (jpMonth) return `${jpMonth[1]}-${jpMonth[2].padStart(2, '0')}-28`;
+/**
+ * Extract preorder deadline from text like:
+ *   "Preorder Period: 2026/05/14〜2026/06/24 (JST)"
+ *   "予約期間：2026/05/14〜2026/06/24"
+ * Returns the END date (deadline) in YYYY-MM-DD format.
+ */
+function parseDeadline(text) {
+  if (!text) return null;
+  // Match the end date after 〜 or ~
+  const m = text.match(/[〜~]\s*(\d{4})[/-](\d{1,2})[/-](\d{1,2})/);
+  if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+  // Fallback: any date
+  const d = text.match(/(\d{4})[/-](\d{1,2})[/-](\d{1,2})/);
+  if (d) return `${d[1]}-${d[2].padStart(2, '0')}-${d[3].padStart(2, '0')}`;
   return null;
 }
 
 /**
- * Scrape GoodSmile products using multiple strategies.
- * Strategy 1: English product pages (category listings)
- * Strategy 2: Japanese search page
- * Strategy 3: Preorder schedule page
+ * Detect category from product name
+ */
+function detectCategory(name) {
+  const n = name.toLowerCase();
+  if (n.startsWith('nendoroid')) return 'Nendoroid';
+  if (n.startsWith('figma ')) return 'figma';
+  if (n.includes('pop up parade')) return 'POP UP PARADE';
+  if (n.includes('scale figure') || /1\/[4-8]\s/.test(name)) return 'Scale Figure';
+  if (n.includes('moderoid')) return 'MODEROID';
+  if (n.includes('plamax') || n.includes('plamatea')) return 'Plastic Model';
+  if (n.includes('plush') || n.includes('plushy')) return 'Plush';
+  return 'Figure';
+}
+
+/**
+ * Scrape GoodSmile products from the NEW site (goodsmile.com).
+ *
+ * Strategy:
+ *  1. Fetch homepage → parse "Preorders Open Now" product links
+ *  2. Fetch each product detail page → get deadline, price, images
  */
 async function scrapeGoodSmile() {
-  let products = [];
+  const products = [];
+  const productIds = new Set();
 
-  // ── Strategy 1: English category listing pages ─────────────────────────
-  // These pages list products by announcement year and may be server-rendered
-  const categories = ['scale', 'nendoroid_series', 'figma'];
-  const currentYear = new Date().getFullYear();
+  // ── Step 1: Get product links from homepage ────────────────────────────
+  console.log('[gsc] Fetching homepage...');
+  let $ = null;
+  try {
+    const res = await axios.get('https://www.goodsmile.com/en', {
+      timeout: 25000,
+      headers: HEADERS,
+    });
+    $ = cheerio.load(res.data);
+  } catch (err) {
+    console.error('[gsc] Homepage fetch error:', err.message);
+    return products;
+  }
 
-  for (const cat of categories) {
-    if (products.length > 50) break; // enough products
+  // Find all product links (format: /en/product/{id}/...)
+  const links = [];
+  $('a[href*="/en/product/"]').each((_, el) => {
+    const href = $(el).attr('href') || '';
+    const m = href.match(/\/en\/product\/(\d+)/);
+    if (m && !productIds.has(m[1])) {
+      productIds.add(m[1]);
+      links.push({
+        id: m[1],
+        url: href.startsWith('http') ? href : `https://www.goodsmile.com${href}`,
+      });
+    }
+  });
+
+  console.log(`[gsc] Found ${links.length} unique product links`);
+
+  // Extract basic info directly from homepage
+  $('a[href*="/en/product/"]').each((_, el) => {
+    const $el = $(el);
+    const href = $el.attr('href') || '';
+    const m = href.match(/\/en\/product\/(\d+)/);
+    if (!m) return;
+
+    const text = $el.text().trim();
+    const imgEl = $el.find('img').first();
+    const imageUrl = imgEl.attr('src') || '';
+    const altText = imgEl.attr('alt') || '';
+
+    // Extract name — either from alt text or from link text
+    let name = altText || '';
+    if (!name) {
+      const nameMatch = text.match(/^(.+?)(?:\s*￥|$)/);
+      name = nameMatch ? nameMatch[1].trim() : text.split('\n')[0].trim();
+    }
+
+    // Extract price from text
+    const priceMatch = text.match(/￥[\d,]+/);
+    const price = priceMatch ? priceMatch[0] : '';
+
+    if (!name || name.length < 3) return;
+
+    const id = m[1];
+    if (!products.find(p => p.key === `gsc-${id}`)) {
+      products.push({
+        key: `gsc-${id}`,
+        name,
+        series: '',
+        category: detectCategory(name),
+        price,
+        deadline: null,
+        source: 'GoodSmile',
+        imageUrl: imageUrl.startsWith('http') ? imageUrl : imageUrl ? `https://www.goodsmile.com${imageUrl}` : '',
+        productUrl: `https://www.goodsmile.com/en/product/${id}`,
+      });
+    }
+  });
+
+  console.log(`[gsc] Parsed ${products.length} products from homepage`);
+
+  // ── Step 2: Fetch detail pages for deadlines (batch of up to 15) ──────
+  const toFetch = products.filter(p => !p.deadline).slice(0, 15);
+  console.log(`[gsc] Fetching ${toFetch.length} detail pages for deadlines...`);
+
+  for (const product of toFetch) {
     try {
-      const url = `https://www.goodsmile.info/en/products/category/${cat}/announced/${currentYear}`;
-      const res = await axios.get(url, { timeout: 20000, headers: HEADERS });
-      const $ = cheerio.load(res.data);
+      const res = await axios.get(product.productUrl, {
+        timeout: 15000,
+        headers: HEADERS,
+      });
+      const $d = cheerio.load(res.data);
+      const bodyText = $d('body').text();
 
-      // Try multiple selector patterns for product items
-      const selectors = [
-        '.hitItem', '.hitArticle', '.productItem', '.product',
-        'li.item', '[class*="hitItem"]', '[class*="product"]',
-        'a[href*="/en/product/"]',
-      ];
+      // Find preorder deadline: "Preorder Period: 2026/05/14〜2026/06/24 (JST)"
+      const periodMatch = bodyText.match(/Preorder\s*Period[:\s]*(\d{4}\/\d{1,2}\/\d{1,2})\s*[〜~]\s*(\d{4}\/\d{1,2}\/\d{1,2})/i)
+        || bodyText.match(/予約期間[：:\s]*(\d{4}\/\d{1,2}\/\d{1,2})\s*[〜~]\s*(\d{4}\/\d{1,2}\/\d{1,2})/);
 
-      for (const sel of selectors) {
-        const items = $(sel);
-        if (items.length === 0) continue;
+      if (periodMatch) {
+        product.deadline = parseDeadline(`〜${periodMatch[2]}`);
+      }
 
-        items.each((_, el) => {
-          const $el = $(el);
+      // Extract series if available
+      const seriesEl = $d('a[href*="search_title"]').first();
+      if (seriesEl.length) {
+        product.series = seriesEl.text().trim();
+      }
 
-          // Extract product link and ID
-          const link = $el.is('a') ? $el.attr('href') : ($el.find('a[href*="/product/"]').first().attr('href') || '');
-          const idMatch = link.match(/\/product\/(\d+)/);
-          if (!idMatch) return;
+      // Better image from og:image meta tag
+      const ogImage = $d('meta[property="og:image"]').attr('content');
+      if (ogImage && ogImage.startsWith('http')) {
+        product.imageUrl = ogImage;
+      }
 
-          const key = `gsc-${idMatch[1]}`;
-          if (products.find(p => p.key === key)) return;
-
-          // Extract name
-          const name = $el.find('.hitTtl a, .hitTtl, .product-name, .name, h3, h2').first().text().trim()
-            || $el.find('a').first().text().trim()
-            || $el.find('img').first().attr('alt')
-            || '';
-          if (!name || name.length < 3) return;
-
-          // Extract date
-          const dateRaw = $el.find('.hitDate, .releaseDate, [class*="Date"], time, .date').first().text().trim();
-          const deadline = parseDate(dateRaw);
-
-          // Extract price
-          const price = $el.find('.hitPrice, .price, [class*="Price"]').first().text().trim();
-
-          // Extract image
-          const imgEl = $el.find('img[data-src], img[src]').first();
-          const imageUrl = imgEl.attr('data-src') || imgEl.attr('src') || '';
-
-          // Extract category
-          const category = $el.find('.hitCat, .category, [class*="Cat"]').first().text().trim();
-
-          const productUrl = link.startsWith('http') ? link : `https://www.goodsmile.info${link}`;
-
-          products.push({
-            key,
-            name: translateJP(name),
-            series: '',
-            category: translateJP(category) || cat.replace(/_/g, ' '),
-            price,
-            deadline,
-            source: 'GoodSmile',
-            imageUrl: imageUrl.startsWith('http') ? imageUrl : imageUrl ? `https://www.goodsmile.info${imageUrl}` : '',
-            productUrl,
-          });
-        });
-
-        if (products.length > 0) break;
+      // Better price from detail page
+      if (!product.price) {
+        const priceMatch = bodyText.match(/￥[\d,]+/);
+        if (priceMatch) product.price = priceMatch[0];
       }
 
       await sleep(DELAY_MS);
     } catch (err) {
-      console.error(`[gsc] Category ${cat} error:`, err.message);
+      console.error(`[gsc] Detail page error for ${product.key}:`, err.message);
     }
   }
 
-  if (products.length > 0) {
-    console.log(`[gsc] Category scrape: ${products.length} products`);
-    return products;
-  }
-
-  // ── Strategy 2: Japanese search page ───────────────────────────────────
-  try {
-    const res = await axios.get('https://www.goodsmile.info/ja/products/search', {
-      params: { preorder: '1' },
-      timeout: 20000,
-      headers: { ...HEADERS, 'Accept-Language': 'ja' },
-    });
-
-    const $ = cheerio.load(res.data);
-
-    // Look for JSON data embedded in <script> tags
-    const scripts = $('script').toArray();
-    for (const script of scripts) {
-      const text = $(script).html() || '';
-
-      // Try to find product data in various JS variable formats
-      const patterns = [
-        /products\s*[:=]\s*(\[[\s\S]*?\]);/,
-        /window\.__INITIAL_STATE__\s*=\s*({[\s\S]*?});/,
-        /data\s*[:=]\s*(\{[\s\S]*?"products"[\s\S]*?\});/,
-      ];
-
-      for (const pattern of patterns) {
-        const match = text.match(pattern);
-        if (!match) continue;
-        try {
-          const data = JSON.parse(match[1]);
-          const items = Array.isArray(data) ? data : (data.products || []);
-          for (const item of items) {
-            const id = item.id || item.product_id;
-            if (!id) continue;
-            products.push({
-              key: `gsc-${id}`,
-              name: translateJP(item.name || item.title || ''),
-              category: translateJP(item.category || ''),
-              price: item.price || '',
-              deadline: parseDate(item.deadline || item.release_date || item.order_close_date),
-              source: 'GoodSmile',
-              imageUrl: item.image || item.thumb || '',
-              productUrl: `https://www.goodsmile.info/en/product/${id}`,
-            });
-          }
-        } catch { /* not valid JSON */ }
-      }
-    }
-
-    // Also try standard HTML selectors
-    if (products.length === 0) {
-      const selectors = ['.hitItem', '.hitArticle', 'li.item', '.product', '[class*="hitItem"]'];
-      for (const sel of selectors) {
-        const items = $(sel);
-        if (items.length === 0) continue;
-
-        items.each((_, el) => {
-          const $el = $(el);
-          const name = $el.find('.hitTtl a, .hitTtl, .name, h3').first().text().trim();
-          if (!name) return;
-
-          const link = $el.find('a[href*="/product/"], a[href*="/p/"]').first().attr('href') || '';
-          const idMatch = link.match(/\/(?:product|p)\/(\d+)/);
-          const key = idMatch
-            ? `gsc-${idMatch[1]}`
-            : `gsc-${Buffer.from(name.slice(0, 30)).toString('base64url').slice(0, 16)}`;
-
-          if (products.find(p => p.key === key)) return;
-
-          const dateRaw = $el.find('.hitDate, .releaseDate, [class*="Date"], time').first().text().trim();
-          const imgEl = $el.find('img[data-src], img').first();
-          const imageUrl = imgEl.attr('data-src') || imgEl.attr('src') || '';
-
-          products.push({
-            key,
-            name: translateJP(name),
-            category: translateJP($el.find('.hitCat, .category').first().text().trim()),
-            price: $el.find('.hitPrice, .price').first().text().trim(),
-            deadline: parseDate(dateRaw),
-            source: 'GoodSmile',
-            imageUrl: imageUrl.startsWith('http') ? imageUrl : imageUrl ? `https://www.goodsmile.info${imageUrl}` : '',
-            productUrl: link.startsWith('http') ? link : link ? `https://www.goodsmile.info${link}` : '',
-          });
-        });
-
-        if (products.length > 0) break;
-      }
-    }
-
-    if (products.length > 0) {
-      console.log(`[gsc] Search scrape: ${products.length} products`);
-      return products;
-    }
-  } catch (err) {
-    console.error('[gsc] Search scrape error:', err.message);
-  }
-
-  // ── Strategy 3: Preorder schedule page ──────────────────────────────────
-  try {
-    const res = await axios.get('https://www.goodsmile.info/ja/preorder/schedule', {
-      timeout: 20000,
-      headers: { ...HEADERS, 'Accept-Language': 'ja' },
-    });
-
-    const $ = cheerio.load(res.data);
-
-    let currentDeadline = null;
-    $('body').find('*').each((_, el) => {
-      const $el = $(el);
-      const tag = el.tagName?.toLowerCase();
-
-      if (['h2', 'h3', 'h4', 'dt', 'th'].includes(tag)) {
-        const txt = $el.text();
-        const m = txt.match(/(\d{4})年(\d{1,2})月(\d{1,2})日/);
-        if (m) currentDeadline = `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
-      }
-
-      if (tag === 'a' && $el.attr('href')?.includes('/p/')) {
-        const name = $el.text().trim() || $el.find('img').attr('alt') || '';
-        if (!name || name.length < 3) return;
-        const href = $el.attr('href');
-        const idMatch = href.match(/\/p\/(\d+)/);
-        if (!idMatch) return;
-        const key = `gsc-${idMatch[1]}`;
-        if (products.find(p => p.key === key)) return;
-
-        const imgSrc = $el.find('img').attr('data-src') || $el.find('img').attr('src') || '';
-        products.push({
-          key,
-          name: translateJP(name),
-          category: '',
-          price: '',
-          deadline: currentDeadline,
-          source: 'GoodSmile',
-          imageUrl: imgSrc.startsWith('http') ? imgSrc : imgSrc ? `https://www.goodsmile.info${imgSrc}` : '',
-          productUrl: href.startsWith('http') ? href : `https://www.goodsmile.info${href}`,
-        });
-      }
-    });
-
-    console.log(`[gsc] Schedule scrape: ${products.length} products`);
-  } catch (err) {
-    console.error('[gsc] Schedule scrape error:', err.message);
-  }
-
-  // ── Strategy 4: English product listing by recent IDs ──────────────────
-  // If all else fails, try fetching a few recent product detail pages
-  if (products.length === 0) {
-    console.log('[gsc] All scrapers failed. Trying individual product pages...');
-    // Try recent product ID range (GoodSmile IDs are sequential)
-    // This is a fallback - we try a small range of recent IDs
-    const startId = 16000; // approximate recent range
-    const endId = startId + 20;
-
-    for (let id = endId; id >= startId; id--) {
-      try {
-        const url = `https://www.goodsmile.info/en/product/${id}`;
-        const res = await axios.get(url, {
-          timeout: 15000,
-          headers: HEADERS,
-          maxRedirects: 3,
-          validateStatus: s => s < 400,
-        });
-
-        const $ = cheerio.load(res.data);
-        const name = $('h1, .product-name, .title').first().text().trim();
-        if (!name || name.length < 3) continue;
-
-        const imgEl = $('img.product-img, .product-image img, [class*="product"] img').first();
-        const imageUrl = imgEl.attr('data-src') || imgEl.attr('src') || '';
-
-        // Look for preorder/release info
-        const bodyText = $('body').text();
-        const dateMatch = bodyText.match(/(?:Pre-order|Preorder|予約|受注).{0,50}?(\d{4})[年/-](\d{1,2})[月/-](\d{1,2})/i);
-        const deadline = dateMatch
-          ? `${dateMatch[1]}-${dateMatch[2].padStart(2, '0')}-${dateMatch[3].padStart(2, '0')}`
-          : null;
-
-        const price = $('[class*="price"], .price').first().text().trim();
-        const category = $('[class*="category"], .category').first().text().trim();
-
-        products.push({
-          key: `gsc-${id}`,
-          name: translateJP(name),
-          category: translateJP(category),
-          price,
-          deadline,
-          source: 'GoodSmile',
-          imageUrl: imageUrl.startsWith('http') ? imageUrl : imageUrl ? `https://www.goodsmile.info${imageUrl}` : '',
-          productUrl: url,
-        });
-
-        await sleep(DELAY_MS);
-      } catch {
-        // Product ID doesn't exist or page error — skip
-      }
-    }
-    console.log(`[gsc] Individual pages: ${products.length} products`);
-  }
+  const withDeadlines = products.filter(p => p.deadline).length;
+  console.log(`[gsc] Done — ${products.length} products (${withDeadlines} with deadlines)`);
 
   return products;
 }
