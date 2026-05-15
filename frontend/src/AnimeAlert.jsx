@@ -341,8 +341,25 @@ export default function AnimeAlert() {
           <option value="GoodSmile">GoodSmile</option>
           <option value="AmiAmi">AmiAmi</option>
         </select>
-        <input type="text" placeholder="Type (Figure, Plush…)" value={filterType}
-          onChange={e => setFilterType(e.target.value.slice(0, 50))} maxLength={50} className="filter-input" />
+        <select value={filterType} onChange={e => setFilterType(e.target.value)} className="filter-select">
+          <option value="">All Types</option>
+          <option value="figure">Figure</option>
+          <option value="scale">Scale Figure</option>
+          <option value="nendoroid">Nendoroid</option>
+          <option value="figma">figma</option>
+          <option value="plastic model">Plastic Model</option>
+          <option value="plush">Plush</option>
+          <option value="acrylic">Acrylic Stand</option>
+          <option value="keychain">Keychain</option>
+          <option value="t-shirt">T-Shirt</option>
+          <option value="poster">Poster</option>
+          <option value="badge">Badge / Pin</option>
+          <option value="tapestry">Tapestry</option>
+          <option value="rubber">Rubber Strap</option>
+          <option value="towel">Towel</option>
+          <option value="bag">Bag</option>
+          <option value="accessories">Accessories</option>
+        </select>
       </div>
 
       {showWatchlist && watchlistKeys.length > 0 && (
